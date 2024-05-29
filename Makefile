@@ -1,4 +1,4 @@
-BENCHES := fork posix_spawn vfork
+BENCHES := fork posix_spawn vfork clone_vm io_uring_spawn
 TARGETS := $(BENCHES) t
 
 all: $(TARGETS)
@@ -9,8 +9,11 @@ bench: all
 clean:
 	rm -f $(TARGETS)
 
+CFLAGS_io_uring_spawn = $(shell PKG_CONFIG_PATH=/tmp/liburing-spawn/lib/pkgconfig pkg-config --cflags liburing)
+LIBS_io_uring_spawn = $(shell PKG_CONFIG_PATH=/tmp/liburing-spawn/lib/pkgconfig pkg-config --libs liburing)
+
 $(BENCHES): bench.c
-	gcc -static -DUSE_$@ -DBENCH_NAME=\"$@\" -Wall -Werror -O0 -g $< -o $@
+	gcc -static -DUSE_$@ -DBENCH_NAME=\"$@\" $(CFLAGS_$@) -Wall -Werror -O0 -g $< $(LIBS_$@) -o $@
 
 ARCH=$(shell uname -m)
 

@@ -19,10 +19,45 @@ const uint64_t ITERATIONS = 2000;
 
 #ifdef DO_PATH_SEARCH
 #define exec_func execvpe
+#define posix_spawn_func posix_spawnp
 #define PATH_TO_T "t"
 #else
 #define exec_func execve
+#define posix_spawn_func posix_spawn
 #define PATH_TO_T "./t"
+#endif
+
+#ifdef USE_io_uring_spawn
+#include "liburing.h"
+
+struct io_uring ring;
+
+void do_setup(void)
+{
+    int ret = io_uring_queue_init(ITERATIONS * 8, &ring, 0);
+    if (ret)
+        errx(1, "io_uring_queue_init");
+    ret = io_uring_register_ring_fd(&ring);
+    if (ret != 1)
+        errx(1, "io_uring_register_ring_fd");
+}
+#else
+void do_setup(void)
+{
+}
+#endif
+
+#ifdef USE_clone_vm
+static uint8_t clone_vm_stack[4096];
+static const char *clone_vm_filename;
+static char *const *clone_vm_argv;
+static char *const *clone_vm_envp;
+
+static int clone_vm_target(void *_unused)
+{
+    exec_func(clone_vm_filename, clone_vm_argv, clone_vm_envp);
+    err(1, "exec");
+}
 #endif
 
 pid_t do_spawn(const char *filename, char *const argv[], char *const envp[])
@@ -38,12 +73,48 @@ pid_t do_spawn(const char *filename, char *const argv[], char *const envp[])
     if (pid == -1)
         err(1, "fork");
     if (pid == 0) {
-        execvpe(filename, argv, envp);
-        err(1, "execvpe");
+        exec_func(filename, argv, envp);
+        err(1, "exec");
     }
 #elif defined(USE_posix_spawn)
-    if (posix_spawnp(&pid, filename, NULL, NULL, argv, envp) != 0)
-        err(1, "posix_spawnp");
+    if (posix_spawn_func(&pid, filename, NULL, NULL, argv, envp) != 0)
+        err(1, "posix_spawn");
+#elif defined(USE_clone_vm)
+    clone_vm_filename = filename;
+    clone_vm_argv = argv;
+    clone_vm_envp = envp;
+    pid = clone(clone_vm_target, clone_vm_stack+sizeof(clone_vm_stack)-1, CLONE_VM | SIGCHLD, NULL);
+    if (pid == -1)
+        err(1, "clone");
+#elif defined(USE_io_uring_spawn)
+    struct io_uring_sqe *sqe;
+    sqe = io_uring_get_sqe(&ring);
+    io_uring_prep_clone(sqe);
+    io_uring_sqe_set_flags(sqe, IOSQE_IO_LINK);
+#ifdef DO_PATH_SEARCH
+    sqe = io_uring_get_sqe(&ring);
+    io_uring_prep_exec(sqe, "/usr/local/bin/t", argv, envp);
+    io_uring_sqe_set_flags(sqe, IOSQE_IO_HARDLINK);
+    sqe = io_uring_get_sqe(&ring);
+    io_uring_prep_exec(sqe, "/usr/local/sbin/t", argv, envp);
+    io_uring_sqe_set_flags(sqe, IOSQE_IO_HARDLINK);
+    sqe = io_uring_get_sqe(&ring);
+    io_uring_prep_exec(sqe, "/usr/bin/t", argv, envp);
+    io_uring_sqe_set_flags(sqe, IOSQE_IO_HARDLINK);
+    sqe = io_uring_get_sqe(&ring);
+    io_uring_prep_exec(sqe, "/usr/sbin/t", argv, envp);
+    io_uring_sqe_set_flags(sqe, IOSQE_IO_HARDLINK);
+    sqe = io_uring_get_sqe(&ring);
+    io_uring_prep_exec(sqe, "/bin/t", argv, envp);
+    io_uring_sqe_set_flags(sqe, IOSQE_IO_HARDLINK);
+    sqe = io_uring_get_sqe(&ring);
+    io_uring_prep_exec(sqe, "/sbin/t", argv, envp);
+    io_uring_sqe_set_flags(sqe, IOSQE_IO_HARDLINK);
+#endif
+    sqe = io_uring_get_sqe(&ring);
+    io_uring_prep_exec(sqe, "./t", argv, envp);
+    io_uring_submit(&ring);
+    return -1;
 #else
 #error Unknown spawn method
 #endif
@@ -90,6 +161,8 @@ int main(int argc, char *argv[], char *envp[])
     assert(pipes[1] == 4);
     char *const t_argv[] = { "t", NULL };
     char *const t_envp[] = { NULL };
+
+    do_setup();
 
     for (int size_index = 0; size_index < N_SIZES; size_index++) {
         struct size size = SIZES[size_index];

@@ -1,4 +1,6 @@
+clone_vm
 fork
+io_uring_spawn
 posix_spawn
 t
 vfork
